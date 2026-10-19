@@ -196,6 +196,7 @@ label.btn{display:inline-flex;align-items:center;justify-content:center;cursor:p
 .arow{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .tfield{display:flex;gap:4px;align-items:center}
 .tfield input{text-align:center;font-family:var(--f-mono)}
+.tfield .note{flex:none;white-space:nowrap}
 .tfield button{flex:none;width:36px;height:38px;border-radius:8px;border:1px solid var(--line);background:var(--bg);font:600 15px var(--f-mono)}
 .prog{height:8px;border-radius:4px;background:var(--chip);overflow:hidden}
 .prog i{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
@@ -343,13 +344,22 @@ label.btn{display:inline-flex;align-items:center;justify-content:center;cursor:p
     </div>
     <div class="grid2">
       <div class="field"><label for="a-bpm">テンポ（空欄で自動推定）</label><input id="a-bpm" type="number" inputmode="numeric" min="40" max="260" placeholder="自動"></div>
-      <div class="field"><label for="a-origin">小節の頭</label><select id="a-origin"><option value="first">最初に拾った音</option><option value="start">選んだ範囲の始まり</option></select></div>
+      <div class="field"><label for="a-bars">全体の小節数（わかれば）</label><input id="a-bars" type="number" inputmode="numeric" min="1" max="400" placeholder="自動"></div>
     </div>
+    <div class="grid2">
+      <div class="field"><label for="a-origin">小節の頭</label><select id="a-origin"><option value="first">最初に拾った音</option><option value="nth">何音目かを指定</option><option value="start">選んだ範囲の始まり</option></select></div>
+      <div class="field" id="a-nthwrap" hidden><label for="a-nth">小節の頭にする音</label><div class="tfield"><input id="a-nth" type="number" inputmode="numeric" min="1" value="1"><span class="note">音目</span></div></div>
+    </div>
+    <p class="note">「何音目」の前の音は、前の小節（弱起）に入ります。小節数を入れると、小節の頭から範囲の終わりまでがその小節数になるようにテンポを決めます（テンポ欄より優先）。範囲の終わりは最後の小節の終わりに合わせてください。</p>
 
     <h3>細かい調整</h3>
     <div class="grid2">
       <div class="field"><label for="a-sens">拾う音の量</label><select id="a-sens"><option value="0">少なめ（はっきりした音だけ）</option><option value="1" selected>ふつう</option><option value="2">多め（小さい音も拾う）</option></select></div>
       <div class="field"><label for="a-pos">弾く位置の好み</label><select id="a-pos"><option value="auto">自動（移動が少ない位置）</option><option value="low">ローポジション寄り</option><option value="mid">5〜12フレット寄り</option><option value="high">ハイポジション寄り</option></select></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label for="a-denoise">ずっと鳴っている音</label><select id="a-denoise"><option value="on">ノイズとして消す</option><option value="off">消さない</option></select></div>
+      <div class="field"><label for="a-ring">前の音の伸び（和音のとき）</label><select id="a-ring"><option value="weak">弱めに除く（標準）</option><option value="strong">強めに除く</option><option value="off">除かない</option></select></div>
     </div>
     <div class="field"><label for="a-dest">追加先</label><select id="a-dest"><option value="new">新しい曲として作る</option><option value="end">今の曲の最後に追加</option><option value="cursor">今の曲の選択中の小節の後ろに追加</option></select></div>
 
@@ -1623,7 +1633,8 @@ async function polyNotes(x, sr, hop, onsets, rms, fps, o, prog, frameT, only){
     // spectrum just before the pick: whatever is still ringing from earlier notes
     frameMag(x, on - N - 64, N, win, fft, re, im, pre);
     // keep only what got louder at this pick, so ringing notes are not picked again
-    for (let q = 0; q < acc.length; q++) acc[q] = Math.sqrt(Math.max(0, acc[q] - pre[q] * 1.05));
+    const ringK = {strong: 1.05, weak: 0.75, off: 0}[o.ring] ?? 0.75;
+    for (let q = 0; q < acc.length; q++) acc[q] = Math.sqrt(Math.max(0, acc[q] - pre[q] * ringK));
     const midis = pickPitches(acc, bin, maxPoly, relThr, mix);
     if (midis.length){
       let peak = 0; for (let f = i; f < Math.min(next, i + 8); f++) peak = Math.max(peak, rms[f]);
@@ -1653,8 +1664,9 @@ async function transcribe(o, prog){
   let x = AI.x.subarray(Math.floor(AI.a * sr), Math.floor(AI.b * sr));
   x = biquad(x, sr, 'hp', 70);
   if (o.content === 'mix'){ x = biquad(x, sr, 'lp', 4500); x = biquad(x, sr, 'hp', 90); }
+  if (o.denoise) x = await denoise(x, sr, p => prog(0.12 * p, 'ずっと鳴っている音を取り除いています'));
   let pk = 0; for (let i = 0; i < x.length; i++) pk = Math.max(pk, Math.abs(x[i]));
-  if (pk < 1e-4) return {notes: [], bpm: 0, offset: 0, mode: o.content};
+  if (pk < 1e-4) return {notes: [], bpm: 0, offset: 0, mode: o.content, span: x.length / sr};
   for (let i = 0; i < x.length; i++) x[i] *= 0.9 / pk;
   const hop = 256, N1 = 1024, fps = sr / hop, nF = Math.max(1, Math.floor((x.length - N1) / hop));
   const frameT = i => (i * hop + 512) / sr;
@@ -1696,7 +1708,35 @@ async function transcribe(o, prog){
   }
   prog(0.97, 'テンポを推定しています'); await yieldUI();
   const bpm = estTempo(flux, fps) || 90;
-  return {notes, bpm, offset, mode: o.content === 'mix' ? 'mix' : mode};
+  return {notes, bpm, offset, mode: o.content === 'mix' ? 'mix' : mode, span: x.length / sr};
+}
+// spectral subtraction of whatever sounds through the whole range (hum, hiss, a drone that never stops)
+async function denoise(x, sr, prog){
+  const N = 2048, H = 512, fft = makeFFT(N), win = hann(N), half = N / 2;
+  const nF = Math.max(1, Math.floor((x.length - N) / H) + 1);
+  const re = new Float64Array(N), im = new Float64Array(N), mag = new Float32Array(half);
+  const step = Math.max(1, Math.floor(nF / 600)); const samples = [];
+  for (let f = 0; f < nF; f += step){ frameMag(x, f * H, N, win, fft, re, im, mag); samples.push(Float32Array.from(mag)); }
+  // a level reached in 80% of the frames is something that never stops sounding
+  const noise = new Float32Array(half), col = new Float32Array(samples.length);
+  for (let k = 0; k < half; k++){ for (let j = 0; j < samples.length; j++) col[j] = samples[j][k]; col.sort(); noise[k] = col[Math.floor(col.length * 0.2)] * 1.8; }
+  const y = new Float32Array(x.length), ws = new Float32Array(x.length);
+  for (let f = 0; f < nF; f++){
+    const s = f * H;
+    for (let i = 0; i < N; i++){ re[i] = (x[s + i] || 0) * win[i]; im[i] = 0; }
+    fft(re, im);
+    for (let k = 0; k < N; k++){
+      const kk = k <= half ? Math.min(k, half - 1) : N - k;
+      const m = Math.hypot(re[k], im[k]); if (m < 1e-12) continue;
+      const g = Math.max(0.06, (m - noise[kk]) / m); re[k] *= g; im[k] *= g;
+    }
+    for (let i = 0; i < N; i++) im[i] = -im[i];
+    fft(re, im);
+    for (let i = 0; i < N && s + i < y.length; i++){ y[s + i] += re[i] / N * win[i]; ws[s + i] += win[i] * win[i]; }
+    if (f % 120 === 0){ prog(f / nF); await yieldUI(); }
+  }
+  for (let i = 0; i < y.length; i++) if (ws[i] > 1e-3) y[i] /= ws[i];
+  return y;
 }
 
 /* ---------- audio import: rhythm & frets ---------- */
@@ -1760,28 +1800,41 @@ function assignFrets(notes, tun, capo, pref){
 function buildMeasures(res, o){
   const notes = res.notes.filter(n => n.pos);
   const ts = o.ts, upm = Math.round(16 * ts[0] / ts[1]);
-  const bpm = o.bpm || res.bpm || 90;
   const mk = (n, u) => {
     const [d, dot] = u ? UNIT_DUR[u] : [null, false];
     const e = newEv(n.pos.map(p => ({s: p.s, f: p.f, t: ''})), {d, dot});
     if (n.leg && e.n.length === 1) e.n[0].t = n.leg;
     return e;
   };
-  if (!notes.length) return [];
-  const origin0 = o.origin === 'first' ? notes[0].t0 : 0;
+  if (!notes.length) return {ms: [], bpm: 0};
+  // the note that falls on the first downbeat (notes before it become a pickup)
+  let anchor = -1;
+  if (o.origin === 'first') anchor = 0;
+  else if (o.origin === 'nth'){ const ref = res.notes[Math.min(res.notes.length, o.nth) - 1]; anchor = Math.max(0, notes.findIndex(n => n.t0 >= ref.t0)); }
+  const originT = anchor >= 0 ? notes[anchor].t0 : 0;
+  const qpb = 4 * ts[0] / ts[1];
+  let bpm = o.bpm || res.bpm || 90;
+  if (o.bars > 0 && res.span - originT > 0.5) bpm = o.bars * qpb * 60 / (res.span - originT);
   if (!o.grid){
-    const mlen = 60 / bpm * 4 * ts[0] / ts[1]; const ms = [];
-    notes.forEach(n => { const mi = Math.max(0, Math.floor((n.t0 - origin0 + 0.03) / mlen)); while (ms.length <= mi) ms.push({mode: 'none', ev: []}); ms[mi].ev.push(mk(n, 0)); });
-    return ms;
+    const mlen = 60 / bpm * qpb; const ms = [];
+    const mis = notes.map(n => Math.floor((n.t0 - originT + 0.03) / mlen)); const sh = Math.max(0, -Math.min(...mis));
+    notes.forEach((n, i) => { const mi = mis[i] + sh; while (ms.length <= mi) ms.push({mode: 'none', ev: []}); ms[mi].ev.push(mk(n, 0)); });
+    return {ms, bpm};
   }
   const step = o.grid === 8 ? 2 : 1, unit = 60 / bpm / 4 * step;
-  let origin = origin0; let last = -1; const q = [];
-  notes.forEach(n => {
-    const pos = (n.t0 - origin) / unit; let k = Math.round(pos);
+  const q = new Array(notes.length);
+  const from = Math.max(0, anchor);
+  let origin = originT, last = -Infinity;
+  for (let i = from; i < notes.length; i++){
+    const pos = (notes[i].t0 - origin) / unit; let k = Math.round(pos);
     if (Math.abs(pos - k) < 0.5) origin += 0.25 * (pos - k) * unit;
     if (k <= last) k = last + 1;
-    q.push(k * step); last = k;
-  });
+    q[i] = k; last = k;
+  }
+  let nextK = q[from];
+  for (let i = from - 1; i >= 0; i--){ let k = Math.round((notes[i].t0 - originT) / unit); if (k >= nextK) k = nextK - 1; q[i] = k; nextK = k; }
+  const minU = Math.min(...q) * step, shift = minU < 0 ? Math.ceil(-minU / upm) * upm : 0;
+  for (let i = 0; i < q.length; i++) q[i] = q[i] * step + shift;
   const items = []; let cur = 0;
   notes.forEach((n, i) => {
     const s = q[i]; if (s > cur) items.push({start: cur, len: s - cur});
@@ -1804,7 +1857,7 @@ function buildMeasures(res, o){
       len -= seg;
     }
   });
-  return ms;
+  return {ms, bpm};
 }
 
 /* ---------- audio import: UI ---------- */
@@ -1853,6 +1906,8 @@ function audioOpts(){
   return {
     content: $('#a-content').value, sens: +$('#a-sens').value, grid: +$('#a-grid').value,
     ts: $('#a-ts').value.split('/').map(Number), bpm: +$('#a-bpm').value || 0, origin: $('#a-origin').value,
+    nth: Math.max(1, +$('#a-nth').value || 1), bars: Math.max(0, +$('#a-bars').value || 0),
+    denoise: $('#a-denoise').value === 'on', ring: $('#a-ring').value,
     pos: $('#a-pos').value, dest: $('#a-dest').value,
     tuning: tv === 'cur' ? S.cur.tuning.slice() : TUNINGS[+tv][1].slice(), capo: +$('#a-capo').value,
   };
@@ -1937,6 +1992,8 @@ function showResult(){
   let t = `<b>${r.notes.length}</b>個の音を拾いました${chords ? `（うち和音 <b>${chords}</b>）` : ''}。<br>解析方法: ${modeName}${$('#a-content').value === 'auto' ? '（自動判定）' : ''}<br>テンポの推定: ♩=<b>${r.bpm}</b>`;
   if (r.mode === 'mono' && Math.abs(r.offset) >= 10) t += `<br>音源の音程のずれ: <b>${r.offset > 0 ? '+' : ''}${r.offset}</b>セント（補正して拾いました）`;
   if (r.mode === 'mix') t += '<br>ほかの楽器が入っている音源は拾い漏れや誤りが多くなります。たたき台として直してください。';
+  const head = r.notes.slice(0, 8).map((n, i) => `${i + 1}) ${n.midis.length > 1 ? n.midis.map(nn).join('+') : nno(n.midis[0])}　${(n.t0 + AI.a).toFixed(2)}秒`);
+  t += `<br><small>最初の音（「何音目」を選ぶときの目安）:<br>${head.join('<br>')}</small>`;
   box.innerHTML = t; $('#a-apply').hidden = false; $('#a-result').hidden = false;
   if (!$('#a-bpm').value) $('#a-bpm').placeholder = '自動（' + r.bpm + '）';
 }
@@ -1945,9 +2002,9 @@ function applyImport(){
   const o = audioOpts();
   const notes = r.notes.map(n => ({...n, pos: null}));
   const st = assignFrets(notes, o.tuning, o.capo, o.pos);
-  const ms = buildMeasures({...r, notes}, o);
+  const built = buildMeasures({...r, notes}, o), ms = built.ms;
   if (!ms.length){ toast('チューニングの範囲で弾ける音がありませんでした'); return; }
-  const bpm = o.bpm || r.bpm || 90;
+  const bpm = Math.round(built.bpm) || 90;
   if (o.dest === 'new'){
     const s = newSong(AI.name || '音源から'); s.tuning = o.tuning; s.capo = o.capo; s.ts = o.ts; s.tempo = bpm; s.defDur = 16;
     s.view = o.grid ? 'stems' : 'none'; ms.forEach(m => m.mode = null); s.measures = ms;
@@ -1965,7 +2022,7 @@ function applyImport(){
     buildFret(); render();
   }
   closeSheet('s-audio');
-  let msg = `${notes.filter(n => n.pos).length}音をタブ譜にしました`;
+  let msg = `${notes.filter(n => n.pos).length}音・${ms.length}小節をタブ譜にしました（♩=${bpm}${o.bars ? '・小節数から計算' : ''}）`;
   if (st.dropped) msg += `（弾ける位置がなく外した音: ${st.dropped}）`;
   toast(msg);
 }
@@ -2075,7 +2132,8 @@ function bind(){
     drawWave();
   };
   $('#a-all').onclick = () => { AI.a = 0; AI.b = AI.dur; AI.v0 = 0; AI.v1 = AI.dur; $('#a-zoom').textContent = '範囲を拡大'; AI.result = null; $('#a-result').hidden = true; syncRange(); };
-  ['#a-content', '#a-sens'].forEach(id => $(id).addEventListener('change', () => { AI.result = null; $('#a-result').hidden = true; }));
+  ['#a-content', '#a-sens', '#a-denoise', '#a-ring'].forEach(id => $(id).addEventListener('change', () => { AI.result = null; $('#a-result').hidden = true; }));
+  $('#a-origin').addEventListener('change', e => { $('#a-nthwrap').hidden = e.target.value !== 'nth'; });
   $('#a-run').onclick = runAnalysis;
   $('#a-apply').onclick = applyImport;
   $('#s-audio').addEventListener('click', e => { if (e.target === $('#s-audio') || e.target.closest('[data-close]')) stopRange(); });
@@ -2099,7 +2157,7 @@ boot();
 })();
 </script>
 <script>
-if ('serviceWorker' in navigator && location.protocol === 'https:') {
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
   navigator.serviceWorker.register('sw.js').catch(function(){});
 }
 </script>
