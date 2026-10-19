@@ -1609,16 +1609,21 @@ function pickPitches(spec, bin, maxPoly, relThr, mix){
 }
 async function polyNotes(x, sr, hop, onsets, rms, fps, o, prog, frameT, only){
   const N = 4096, fft = makeFFT(N), win = hann(N), re = new Float64Array(N), im = new Float64Array(N);
-  const mag = new Float32Array(N / 2), acc = new Float32Array(N / 2), bin = sr / N;
+  const mag = new Float32Array(N / 2), acc = new Float32Array(N / 2), pre = new Float32Array(N / 2), bin = sr / N;
   const mix = o.content === 'mix', maxPoly = mix ? 3 : 6, relThr = (mix ? [0.55, 0.42, 0.32] : [0.45, 0.32, 0.22])[o.sens];
   const n = rms.length; const out = [];
   for (let k = 0; k < onsets.length; k++){
     if (only && !only.has(k)) continue;
     const i = onsets[k], next = k + 1 < onsets.length ? onsets[k + 1] : n;
+    const on = i * hop + 512, nextOn = next < n ? next * hop + 512 : x.length;
+    // spectrum right after the pick (windows start at the attack and stay clear of the next pick where possible)
     acc.fill(0); let cnt = 0;
-    for (let f = i + 2; f < Math.min(next, i + 16); f += 3){ frameMag(x, f * hop + 512 - N / 2, N, win, fft, re, im, mag); for (let q = 0; q < mag.length; q++) acc[q] += mag[q]; cnt++; }
-    if (!cnt){ frameMag(x, (i + 1) * hop + 512 - N / 2, N, win, fft, re, im, mag); acc.set(mag); cnt = 1; }
-    for (let q = 0; q < acc.length; q++) acc[q] = Math.sqrt(acc[q] / cnt);
+    for (let s = on + 64; cnt < 3 && (cnt === 0 || s + N / 2 < nextOn); s += 640){ frameMag(x, s, N, win, fft, re, im, mag); for (let q = 0; q < mag.length; q++) acc[q] += mag[q]; cnt++; }
+    for (let q = 0; q < acc.length; q++) acc[q] /= cnt;
+    // spectrum just before the pick: whatever is still ringing from earlier notes
+    frameMag(x, on - N - 64, N, win, fft, re, im, pre);
+    // keep only what got louder at this pick, so ringing notes are not picked again
+    for (let q = 0; q < acc.length; q++) acc[q] = Math.sqrt(Math.max(0, acc[q] - pre[q] * 1.05));
     const midis = pickPitches(acc, bin, maxPoly, relThr, mix);
     if (midis.length){
       let peak = 0; for (let f = i; f < Math.min(next, i + 8); f++) peak = Math.max(peak, rms[f]);

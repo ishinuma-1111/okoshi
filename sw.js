@@ -1,4 +1,4 @@
-const CACHE = 'tabokoshi-20261019194402';
+const CACHE = 'tabokoshi-20261019215942';
 const CORE = ['./', 'index.html', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(() => self.skipWaiting()));
